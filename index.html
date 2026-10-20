@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CLUBOTIQUE — IA et Arduino Uno</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:850px;margin:30px auto;padding:0 18px;background:#f4f8ff;color:#20304a}main{background:white;padding:25px;border-radius:16px;box-shadow:0 2px 14px #ccd8e8}h1{color:#1769bb}button{padding:12px 18px;margin:5px;border:0;border-radius:9px;background:#1769bb;color:white;font-weight:bold;cursor:pointer}button:disabled{opacity:.5}input{width:95%;padding:10px;border:1px solid #bbb;border-radius:7px}#camera canvas{border-radius:12px;max-width:100%;transform:scaleX(-1)}#status{font-weight:bold}small{color:#555}
+</style>
+</head>
+<body><main>
+<h1>🤖 CLUBOTIQUE — Mon IA reconnaît les gestes</h1>
+<p>1. Colle l'URL de ton modèle Teachable Machine. 2. Connecte Arduino. 3. Lance la webcam.</p>
+<label for="model">URL du modèle</label><br>
+<input id="model" placeholder="https://teachablemachine.withgoogle.com/models/XXXXXXXX/">
+<p><button id="connect">Connecter Arduino</button><button id="start">Démarrer l'IA</button><button id="stop" disabled>Arrêter</button></p>
+<p id="status">En attente.</p><div id="camera"></div><h2 id="result">Aucune prédiction</h2>
+<p><small>Classes attendues : Verte (main ouverte), Rouge (poing), Jaune (deux doigts), Aucun (pas de main). Utiliser Chrome/Edge sur localhost ou HTTPS. Fermer le Moniteur série Arduino.</small></p>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.3/dist/teachablemachine-image.min.js"></script>
+<script>
+let port=null, writer=null, webcam=null, model=null, running=false;
+let lastCommand='', candidate='', stableCount=0, lastSentAt=0;
+const statusEl=document.getElementById('status');
+function status(s){statusEl.textContent=s;}
+async function send(letter){
+  if(!writer || letter===lastCommand || Date.now()-lastSentAt<300)return;
+  try{await writer.write(new TextEncoder().encode(letter));lastCommand=letter;lastSentAt=Date.now();}
+  catch(e){status('Erreur USB : '+e.message);}
+}
+document.getElementById('connect').onclick=async()=>{
+  if(!('serial' in navigator)){status('Web Serial non disponible : utilise Chrome ou Edge sur localhost/HTTPS.');return;}
+  try{
+    if(writer){status('Arduino déjà connecté.');return;}
+    port=await navigator.serial.requestPort();
+    await port.open({baudRate:9600});
+    writer=port.writable.getWriter();
+    status('Arduino connecté. Attends 2 secondes avant de démarrer.');
+    await new Promise(resolve=>setTimeout(resolve,2000));
+  }catch(e){status('Connexion impossible : '+e.message);}
+};
+document.getElementById('start').onclick=async()=>{
+  if(running)return;
+  if(!writer){status('Connecte d’abord Arduino.');return;}
+  let url=document.getElementById('model').value.trim();
+  if(!/^https:\/\/teachablemachine\.withgoogle\.com\/models\/[\w-]+\/?$/.test(url)){
+    status('Colle une URL de modèle Teachable Machine valide.');return;
+  }
+  url=url.replace(/\/?$/,'/');
+  try{
+    status('Chargement du modèle et de la webcam…');
+    model=await tmImage.load(url+'model.json',url+'metadata.json');
+    const labels=model.getClassLabels();
+    if(!['Verte','Rouge','Jaune','Aucun'].every(label=>labels.includes(label))){
+      status('Le modèle doit avoir les classes Verte, Rouge, Jaune, Aucun.');return;
+    }
+    webcam=new tmImage.Webcam(260,260,true);
+    await webcam.setup();await webcam.play();
+    document.getElementById('camera').replaceChildren(webcam.canvas);
+    running=true;lastCommand='';candidate='';stableCount=0;
+    document.getElementById('start').disabled=true;
+    document.getElementById('stop').disabled=false;
+    status('IA active !');requestAnimationFrame(loop);
+  }catch(e){status('Erreur de démarrage : '+e.message);}
+};
+async function loop(){
+  if(!running)return;
+  webcam.update();
+  try{
+    const predictions=await model.predict(webcam.canvas);
+    const best=predictions.reduce((a,b)=>a.probability>b.probability?a:b);
+    document.getElementById('result').textContent=best.className+' : '+Math.round(best.probability*100)+' %';
+    const mapping={Verte:'V',Rouge:'R',Jaune:'J',Aucun:'X'};
+    const letter=best.probability>=0.85 ? mapping[best.className] : 'X';
+    if(letter===candidate)stableCount++;else{candidate=letter;stableCount=1;}
+    if(stableCount>=3)await send(letter);
+  }catch(e){status('Erreur de prédiction : '+e.message);}
+  if(running)requestAnimationFrame(loop);
+}
+document.getElementById('stop').onclick=async()=>{
+  running=false;
+  if(webcam){await webcam.stop();webcam=null;}
+  await send('X');
+  document.getElementById('camera').replaceChildren();
+  document.getElementById('start').disabled=false;
+  document.getElementById('stop').disabled=true;
+  status('IA arrêtée.');
+};
+window.addEventListener('beforeunload',()=>{if(webcam)webcam.stop();});
+</script></body></html>
